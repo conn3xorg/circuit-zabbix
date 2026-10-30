@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Conn3x
+        env: &gh
+          GH_TOKEN: ${{ github.token }}
+        run: &install |
+          tag=$(gh release view -R conn3xorg/conn3x --json tagName -q .tagName)
+          file="conn3x_${tag#v}_linux_amd64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -sSfLO "https://github.com/conn3xorg/conn3x/releases/download/$tag/$file"
+          curl -sSfLO "https://github.com/conn3xorg/conn3x/releases/download/$tag/checksums.txt"
+          grep " $file\$" checksums.txt | sha256sum -c -
+          mkdir -p bin && tar -xzf "$file" -C bin conn3x
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: conn3x version
+      - run: conn3x fmt -check -recursive
+      - name: Validate
+        run: conn3x init -backend=false && conn3x validate
+      - name: Validate the example
+        working-directory: examples/local
+        run: conn3x init -backend=false && conn3x validate
+      - name: Validate the two-host test
+        working-directory: test/two-hosts
+        run: conn3x init -backend=false && conn3x validate
+
+  e2e:
+    needs: validate
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: rocky10
+            os: rocky
+          - distro: ubuntu2404
+            os: ubuntu
+          - distro: debian13
+            os: debian
+    name: e2e (${{ matrix.distro }})
+    env:
+      PODMAN: sudo podman
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The test host images live in the Conn3x repo.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: conn3xorg/conn3x
+          ref: main
+          path: conn3x
+          persist-credentials: false
+          sparse-checkout: test/images
+      - name: Install Conn3x
+        env: *gh
+        run: *install
+      - name: Start the ${{ matrix.distro }} host
+        working-directory: examples/local
+        env:
+          CONTAINERFILE: ${{ github.workspace }}/conn3x/test/images/${{ matrix.distro }}/Containerfile
+        run: ./up.sh
+      - name: Apply, then plan again with no changes
+        working-directory: examples/local
+        env:
+          TF_VAR_os: ${{ matrix.os }}
+        run: |
+          conn3x init
+          conn3x apply -auto-approve
+          conn3x plan -detailed-exitcode
+      # The frontend answers, the API reports the pinned release, Admin
+      # logs in with the example's password and no longer with Zabbix's
+      # default, the server has its own host, and the agent on the same
+      # host answers zabbix_get.
+      - name: Check the server, the frontend, the API and the agent
+        run: |
+          sudo podman exec -i circuit-zabbix sh -eu <<'EOF'
+          u=http://127.0.0.1:8080
+          rpc() { curl -sf -H 'Content-Type: application/json-rpc' ${tok:+-H "Authorization: Bearer $tok"} --data-binary "$1" $u/api_jsonrpc.php; }
+          systemctl is-active zabbix-server zabbix-agent2 nginx
+          curl -sf $u/index.php | grep -q Zabbix
+          rpc '{"jsonrpc":"2.0","method":"apiinfo.version","params":{},"id":1}' | grep -q '"result":"7.0.32"'
+          if rpc '{"jsonrpc":"2.0","method":"user.login","params":{"username":"Admin","password":"zabbix"},"id":1}' | grep -q '"result"'; then exit 1; fi
+          tok=$(rpc '{"jsonrpc":"2.0","method":"user.login","params":{"username":"Admin","password":"staple-paper-clip"},"id":1}' | sed -n 's/.*"result":"\([0-9a-f]*\)".*/\1/p')
+          [ -n "$tok" ]
+          rpc '{"jsonrpc":"2.0","method":"host.get","params":{"output":["host"]},"id":2}' | grep -q '"host":"Zabbix server"'
+          [ "$(zabbix_get -s 127.0.0.1 -k agent.ping)" = 1 ]
+          for _ in $(seq 60); do grep -q 'server #0 started' /var/log/zabbix/zabbix_server.log && break; sleep 1; done
+          grep -q 'server #0 started' /var/log/zabbix/zabbix_server.log
+          echo "All checks passed."
+          EOF
+      - name: Show the logs
+        if: failure()
+        run: sudo podman exec circuit-zabbix sh -c 'tail -n 50 /var/log/zabbix/*.log; journalctl --no-pager -n 50 -u nginx -u "php*"' || true
+      - name: Clean up
+        if: always()
+        working-directory: examples/local
+        run: ./down.sh
+
+  two-hosts:
+    needs: validate
+    runs-on: ubuntu-24.04
+    name: two hosts (Ubuntu server, Rocky agent with PSK)
+    # Rootful, so each container has an address on Podman's bridge the
+    # other can reach.
+    env:
+      PODMAN: sudo podman
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: conn3xorg/conn3x
+          ref: main
+          path: conn3x
+          persist-credentials: false
+          sparse-checkout: test/images
+      - name: Install Conn3x
+        env: *gh
+        run: *install
+      - name: Start the server and agent hosts
+        env:
+          images: ${{ github.workspace }}/conn3x/test/images
+        run: |
+          NAME=zabbix-server PORT=2299 CONTAINERFILE=$images/ubuntu2404/Containerfile examples/local/up.sh
+          cat examples/local/known_hosts >> test/two-hosts/known_hosts
+          NAME=zabbix-agent PORT=2300 CONTAINERFILE=$images/rocky10/Containerfile examples/local/up.sh
+          cat examples/local/known_hosts >> test/two-hosts/known_hosts
+          cp examples/local/id_ed25519 test/two-hosts/
+          echo "TF_VAR_server_ip=$(sudo podman inspect -f '{{.NetworkSettings.IPAddress}}' zabbix-server)" >> "$GITHUB_ENV"
+          echo "AIP=$(sudo podman inspect -f '{{.NetworkSettings.IPAddress}}' zabbix-agent)" >> "$GITHUB_ENV"
+      - name: Apply, then plan again with no changes
+        working-directory: test/two-hosts
+        run: |
+          conn3x init
+          conn3x apply -auto-approve
+          conn3x plan -detailed-exitcode
+      # The agent's key never leaves its host, so the test copies it to the
+      # server the way you would, registers the agent through the API with
+      # it, and waits for the server to reach the agent over PSK.
+      - name: Check the agent answers only over PSK, and the server reaches it
+        run: |
+          sudo podman exec zabbix-agent cat /etc/zabbix/zabbix_agent2.psk | sudo podman exec -i zabbix-server sh -c 'cat > /tmp/agent.psk'
+          sudo podman exec -i -e AIP="$AIP" zabbix-server sh -eu <<'EOF'
+          u=http://127.0.0.1:8080/api_jsonrpc.php
+          rpc() { curl -sf -H 'Content-Type: application/json-rpc' ${tok:+-H "Authorization: Bearer $tok"} --data-binary "$1" $u; }
+          [ "$(zabbix_get -s "$AIP" -k agent.ping --tls-connect psk --tls-psk-identity agent --tls-psk-file /tmp/agent.psk)" = 1 ]
+          if zabbix_get -s "$AIP" -k agent.ping 2>/dev/null; then exit 1; fi
+          tok=$(rpc '{"jsonrpc":"2.0","method":"user.login","params":{"username":"Admin","password":"zabbix"},"id":1}' | sed -n 's/.*"result":"\([0-9a-f]*\)".*/\1/p')
+          rpc "{\"jsonrpc\":\"2.0\",\"method\":\"host.create\",\"params\":{\"host\":\"agent\",\"groups\":[{\"groupid\":\"2\"}],\"interfaces\":[{\"type\":1,\"main\":1,\"useip\":1,\"ip\":\"$AIP\",\"dns\":\"\",\"port\":\"10050\"}],\"templates\":[{\"templateid\":\"10001\"}],\"tls_connect\":2,\"tls_accept\":2,\"tls_psk_identity\":\"agent\",\"tls_psk\":\"$(cat /tmp/agent.psk)\"},\"id\":2}" | grep -q hostids
+          for _ in $(seq 120); do
+            rpc '{"jsonrpc":"2.0","method":"hostinterface.get","params":{"output":["available"],"filter":{"ip":"'"$AIP"'"}},"id":3}' | grep -q '"available":"1"' && { echo "All checks passed."; exit 0; }
+            sleep 2
+          done
+          exit 1
+          EOF
+      - name: Clean up
+        if: always()
+        run: for n in zabbix-server zabbix-agent; do NAME=$n examples/local/down.sh; done
