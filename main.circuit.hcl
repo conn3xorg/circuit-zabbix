@@ -349,12 +349,13 @@ circuit "zabbix_server" {
   }
 
   # The frontend's database settings, which spare you the setup wizard.
-  # Write-only, as it holds the password, in PHP's single quotes.
+  # Write-only, as it holds the password, in PHP's single quotes. The package
+  # gives this directory to the web server's user, so the file is theirs too.
   step "frontend_config" {
     file {
       path       = "/etc/zabbix/web/zabbix.conf.php"
       content_wo = replace(local.frontend_config, "%PASSWORD%", replace(replace(var.database_password == null ? "" : var.database_password, "\\", "\\\\"), "'", "\\'"))
-      owner      = "root"
+      owner      = local.web[each.key].user
       group      = local.web[each.key].user
       mode       = "0640"
     }
