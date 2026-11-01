@@ -19,7 +19,7 @@ module "postgres" {
 }
 
 module "zabbix" {
-  source = "github.com/conn3xorg/circuit-zabbix?ref=v0.1.0"
+  source = "github.com/conn3xorg/circuit-zabbix?ref=v0.1.1"
 
   depends_on = [module.postgres]
 
@@ -57,7 +57,7 @@ Leave `servers` empty and set `server_address` to your Zabbix server, or to the 
 
 ```hcl
 module "zabbix_agents" {
-  source = "github.com/conn3xorg/circuit-zabbix?ref=v0.1.0"
+  source = "github.com/conn3xorg/circuit-zabbix?ref=v0.1.1"
 
   agents         = { web1 = "203.0.113.11", web2 = "203.0.113.12" }
   server_address = "zabbix.example.com"
@@ -160,6 +160,8 @@ Requires Conn3x v0.6.9 or later and systemd on each host, with access to `repo.z
 ## Tested on
 
 Ubuntu 24.04, Debian 13 and Rocky Linux 10. CI applies [examples/local](examples/local), with PostgreSQL from circuit-postgres, the server, the frontend and an agent on one amd64 container, checks that the second plan has no changes, and then checks that the frontend answers `/index.php`, the API reports 7.0.32, Admin logs in with the example's password and no longer with `zabbix`, and `zabbix_get -k agent.ping` returns 1. A second job runs the server on Ubuntu 24.04 and a PSK agent on Rocky Linux 10, in two containers: the agent refuses `zabbix_get` without the key and answers with it, and once the agent is registered through the API with its key, the server reports it available. The same was run on arm64 containers on a Mac.
+
+On arm64 containers, every job above also ran against hosts first applied at v0.1.0 and then moved to this version: the second plan had no changes and the checks passed. All of it ran on Conn3x v0.6.11 and on a newer development build.
 
 On DigitalOcean, a Rocky Linux 10 droplet with SELinux enforcing ran PostgreSQL, the server, the frontend and an agent, and an Ubuntu 24.04 droplet ran a PSK agent reporting over the private network, both with `agent_psk` on. The checks above passed, and passed again after rebooting both, with a second plan that had no changes. The server ran confined as `zabbix_t`, and nginx and PHP-FPM as `httpd_t`.
 
