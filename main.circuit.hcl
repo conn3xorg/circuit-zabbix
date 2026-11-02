@@ -93,7 +93,17 @@ locals {
   pgpassword = "export PGPASSWORD=\"$(sed -n 's/^DBPassword=//p' ${local.db_password_file})\""
   psql       = "psql -X -q -h '${local.db.host}' -p ${local.db.port} -U '${local.db.user}' -d '${local.db.name}'"
 
-  schema_check = "${local.pgpassword}; ${local.psql} -tAc \"SELECT 1 FROM pg_tables WHERE schemaname = current_schema() AND tablename = 'dbversion'\" | grep -qx 1"
+  # On this host, the password only goes to a port held by root or the postgres
+  # user. That narrows the window, since PostgreSQL could stop between the check
+  # and the send. Another host's port can't be checked from here, so a remote
+  # database relies on the network between the hosts and on PostgreSQL's own
+  # authentication. The Zabbix server and frontend connect on their own, with no
+  # check, whichever it is.
+  db_local = { for name, h in var.servers : name => can(regex("^(127\\.|localhost$|::1$|0\\.0\\.0\\.0$|::$)", local.db.host)) || local.db.host == try(h.address, h) }
+  db_held  = { for name, is_local in local.db_local : name => is_local ? "{ p=$(printf ':%04X$' ${local.db.port}); u=$(id -u postgres 2>/dev/null || echo 0); cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p=\"$p\" -v u=\"$u\" '$4 == \"0A\" && $2 ~ p { n++; if ($8 != u && $8 != 0) b = 1 } END { exit !(n && !b) }'; }" : "true" }
+  db_stop  = { for name, held in local.db_held : name => "${held} || { echo \"Port ${local.db.port} isn't held by PostgreSQL, so the password wasn't sent.\" >&2; exit 1; }" }
+
+  schema_check = { for name, held in local.db_held : name => "${held} && { ${local.pgpassword}; ${local.psql} -tAc \"SELECT 1 FROM pg_tables WHERE schemaname = current_schema() AND tablename = 'dbversion'\" | grep -qx 1; }" }
 
   # From zabbix.conf.php.example, with the database filled in.
   frontend_config = <<-EOT
@@ -335,8 +345,8 @@ circuit "zabbix_server" {
   # a first apply, so the command checks again before it imports.
   step "schema" {
     command {
-      command = "set -e; if ${local.schema_check}; then exit 0; fi; ${local.pgpassword}; zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | ${local.psql} -v ON_ERROR_STOP=1 --single-transaction >/dev/null"
-      unless  = local.schema_check
+      command = "set -e; ${local.db_stop[each.key]}; if ${local.schema_check[each.key]}; then exit 0; fi; ${local.db_stop[each.key]}; ${local.pgpassword}; zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | ${local.psql} -v ON_ERROR_STOP=1 --single-transaction >/dev/null"
+      unless  = local.schema_check[each.key]
     }
   }
 
@@ -420,9 +430,10 @@ circuit "zabbix_server" {
 
   # Sets Admin's password through the API when the file changes. It logs in
   # with the new password first, then with Zabbix's default, so it only
-  # changes a password it knows. The password reaches curl on stdin, never
-  # on a command line, and only to a port held by root or the web server's
-  # user. Admin is user 1 in every new Zabbix database.
+  # changes a password it knows. The password and the token reach curl on
+  # stdin or a file descriptor, never on a command line, and only to a port
+  # held by root or the web server's user. Admin is user 1 in every new
+  # Zabbix database.
   step "admin_password" {
     command {
       command  = <<-EOT
@@ -430,12 +441,14 @@ circuit "zabbix_server" {
         held() { p=$(printf ':%04X$' ${var.listen_port}); u=$(id -u ${local.web[each.key].user}); cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p="$p" -v u="$u" '$4 == "0A" && $2 ~ p { n++; if ($8 != u && $8 != 0) b = 1 } END { exit !(n && !b) }'; }
         held || { echo "Port ${var.listen_port} isn't held by the web server, so the password wasn't sent." >&2; exit 1; }
         new=$(sed 's/\\/\\\\/g; s/"/\\"/g' ${local.admin_password_file})
-        rpc() { curl -sS -H 'Content-Type: application/json-rpc' "$@" --data-binary @- ${local.api}; }
-        login() { printf '{"jsonrpc":"2.0","method":"user.login","params":{"username":"Admin","password":"%s"},"id":1}' "$1" | rpc | sed -n 's/.*"result":"\([0-9a-f]*\)".*/\1/p'; }
+        login() { printf '{"jsonrpc":"2.0","method":"user.login","params":{"username":"Admin","password":"%s"},"id":1}' "$1" | curl -sS -H 'Content-Type: application/json-rpc' --data-binary @- ${local.api} | sed -n 's/.*"result":"\([0-9a-f]*\)".*/\1/p'; }
         [ -n "$(login "$new")" ] && exit 0
         tok=$(login zabbix)
         [ -n "$tok" ] || { echo "Admin logs in with neither admin_password nor Zabbix's default password. Set it in the frontend under User settings, then apply again." >&2; exit 1; }
-        out=$(printf '{"jsonrpc":"2.0","method":"user.update","params":{"userid":"1","current_passwd":"zabbix","passwd":"%s"},"id":2}' "$new" | rpc -H "Authorization: Bearer $tok")
+        out=$(printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -sS -K- -H 'Content-Type: application/json-rpc' --data-binary @/dev/fd/3 ${local.api} 3<<JSON
+        {"jsonrpc":"2.0","method":"user.update","params":{"userid":"1","current_passwd":"zabbix","passwd":"$new"},"id":2}
+        JSON
+        )
         echo "$out" | grep -q '"result"' || { echo "Zabbix refused the new Admin password: $out" >&2; exit 1; }
       EOT
       triggers = conn3x_file.zabbix_server__admin_password_file[each.key].revision

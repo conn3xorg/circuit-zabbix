@@ -75,6 +75,14 @@ jobs:
         env:
           CONTAINERFILE: ${{ github.workspace }}/conn3x/test/images/${{ matrix.distro }}/Containerfile
         run: ./up.sh
+      # The first apply sets Admin's password. Records curl's arguments for the
+      # check after it.
+      - name: Record curl's arguments
+        run: |
+          sudo podman exec circuit-zabbix sh -ec '
+            printf "#!/bin/sh\nprintf \"%%s\\n\" \"\$*\" >> /tmp/curl-args\nexec /usr/bin/curl \"\$@\"\n" > /usr/local/bin/curl
+            chmod 755 /usr/local/bin/curl
+          '
       - name: Apply, then plan again with no changes
         working-directory: examples/local
         env:
@@ -83,6 +91,14 @@ jobs:
           conn3x init
           conn3x apply -auto-approve
           conn3x plan -detailed-exitcode
+      - name: Check no credential was on curl's command line
+        run: |
+          sudo podman exec circuit-zabbix sh -ec '
+            rm /usr/local/bin/curl
+            grep -q api_jsonrpc /tmp/curl-args
+            if grep -qE "Bearer|Authorization|staple-paper-clip" /tmp/curl-args; then exit 1; fi
+            rm /tmp/curl-args
+          '
       # The frontend answers, the API reports the pinned release, Admin
       # logs in with the example's password and no longer with Zabbix's
       # default, the server has its own host, and the agent on the same
@@ -104,22 +120,67 @@ jobs:
           grep -q 'server #0 started' /var/log/zabbix/zabbix_server.log
           echo "All checks passed."
           EOF
+      # nginx stays active with nothing listening, so the apply reaches the
+      # admin password step while another process holds the port.
       - name: Another process on the port gets no password
         working-directory: examples/local
         env:
           TF_VAR_os: ${{ matrix.os }}
         run: |
+          sudo podman cp ../../test/api-listener.py circuit-zabbix:/tmp/api-listener.py
           sudo podman exec circuit-zabbix sh -ec '
             command -v python3 >/dev/null || { apt-get -qq update && apt-get -qq install -y python3 || dnf -q install -y python3; } >/dev/null
-            systemctl stop nginx
+            install -d /etc/systemd/system/nginx.service.d
+            printf "[Service]\nType=simple\nPIDFile=\nExecStartPre=\nExecStart=\nExecStart=/bin/sleep infinity\nExecReload=\nExecStop=\n" > /etc/systemd/system/nginx.service.d/ci.conf
+            systemctl daemon-reload
+            systemctl restart nginx
+            install -m 666 /dev/null /tmp/listener.log
           '
-          sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 -m http.server --bind 127.0.0.1 8080 > /tmp/listener.log 2>&1'
+          sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 /tmp/api-listener.py 8080 /tmp/listener.log'
           sleep 3
-          ! TF_VAR_admin_password=a-new-password-3 conn3x apply -auto-approve
+          if out=$(TF_VAR_admin_password=a-new-password-3 conn3x apply -auto-approve -no-color 2>&1); then exit 1; fi
+          printf '%s\n' "$out" | grep -q "exit status 1: Port 8080 isn't held by the web server"
           sudo podman exec circuit-zabbix sh -ec '
-            pkill -f [h]ttp.server || true
-            ! grep -q api_jsonrpc /tmp/listener.log
-            systemctl start nginx
+            grep -q apiinfo.version /tmp/listener.log
+            if grep -qE "user[.](login|update)" /tmp/listener.log; then exit 1; fi
+            pkill -u nobody python3
+            rm -r /etc/systemd/system/nginx.service.d
+            systemctl daemon-reload
+            sleep 3
+            systemctl restart nginx
+          '
+          conn3x apply -auto-approve
+          conn3x plan -detailed-exitcode
+      # The server and frontend connect on their own, so they stop first. Then
+      # nothing should reach the database's port at all.
+      - name: Another process on the database's port gets no password
+        working-directory: examples/local
+        env:
+          TF_VAR_os: ${{ matrix.os }}
+        run: |
+          sudo podman cp ../../test/listener.py circuit-zabbix:/tmp/listener.py
+          sudo podman exec circuit-zabbix sh -ec '
+            systemctl stop zabbix-server nginx
+            systemctl list-units --type=service --state=active --no-legend --plain "postgresql*" | cut -d" " -f1 > /tmp/pg-units
+            systemctl stop $(cat /tmp/pg-units)
+            install -m 666 /dev/null /tmp/listener.log
+          '
+          sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 /tmp/listener.py 5432 /tmp/listener.log'
+          sleep 3
+          if out=$(conn3x apply -auto-approve -no-color -target=module.zabbix 2>&1); then exit 1; fi
+          printf '%s\n' "$out" | grep -q "exit status 1: Port 5432 isn't held by PostgreSQL"
+          sudo podman exec circuit-zabbix sh -ec '
+            [ -e /tmp/listener.log ]
+            [ ! -s /tmp/listener.log ]
+            pkill -u nobody python3
+            # PostgreSQL carries on when it cannot bind an address, so make sure it got this one.
+            for _ in 1 2 3 4 5; do
+              sleep 2
+              systemctl restart $(cat /tmp/pg-units)
+              sleep 2
+              if awk '"'"'$4 == "0A" && $2 == "0100007F:1538" { f = 1 } END { exit !f }'"'"' /proc/net/tcp; then break; fi
+            done
+            systemctl start zabbix-server nginx
           '
           conn3x apply -auto-approve
           conn3x plan -detailed-exitcode
