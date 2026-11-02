@@ -421,11 +421,14 @@ circuit "zabbix_server" {
   # Sets Admin's password through the API when the file changes. It logs in
   # with the new password first, then with Zabbix's default, so it only
   # changes a password it knows. The password reaches curl on stdin, never
-  # on a command line. Admin is user 1 in every new Zabbix database.
+  # on a command line, and only to a port held by root or the web server's
+  # user. Admin is user 1 in every new Zabbix database.
   step "admin_password" {
     command {
       command  = <<-EOT
         [ -s ${local.admin_password_file} ] || exit 0
+        held() { p=$(printf ':%04X$' ${var.listen_port}); u=$(id -u ${local.web[each.key].user}); cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p="$p" -v u="$u" '$4 == "0A" && $2 ~ p { n++; if ($8 != u && $8 != 0) b = 1 } END { exit !(n && !b) }'; }
+        held || { echo "Port ${var.listen_port} isn't held by the web server, so the password wasn't sent." >&2; exit 1; }
         new=$(sed 's/\\/\\\\/g; s/"/\\"/g' ${local.admin_password_file})
         rpc() { curl -sS -H 'Content-Type: application/json-rpc' "$@" --data-binary @- ${local.api}; }
         login() { printf '{"jsonrpc":"2.0","method":"user.login","params":{"username":"Admin","password":"%s"},"id":1}' "$1" | rpc | sed -n 's/.*"result":"\([0-9a-f]*\)".*/\1/p'; }

@@ -104,6 +104,25 @@ jobs:
           grep -q 'server #0 started' /var/log/zabbix/zabbix_server.log
           echo "All checks passed."
           EOF
+      - name: Another process on the port gets no password
+        working-directory: examples/local
+        env:
+          TF_VAR_os: ${{ matrix.os }}
+        run: |
+          sudo podman exec circuit-zabbix sh -ec '
+            command -v python3 >/dev/null || { apt-get -qq update && apt-get -qq install -y python3 || dnf -q install -y python3; } >/dev/null
+            systemctl stop nginx
+          '
+          sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 -m http.server --bind 127.0.0.1 8080 > /tmp/listener.log 2>&1'
+          sleep 3
+          ! TF_VAR_admin_password=a-new-password-3 conn3x apply -auto-approve
+          sudo podman exec circuit-zabbix sh -ec '
+            pkill -f [h]ttp.server || true
+            ! grep -q api_jsonrpc /tmp/listener.log
+            systemctl start nginx
+          '
+          conn3x apply -auto-approve
+          conn3x plan -detailed-exitcode
       - name: Show the logs
         if: failure()
         run: sudo podman exec circuit-zabbix sh -c 'tail -n 50 /var/log/zabbix/*.log; journalctl --no-pager -n 50 -u nginx -u "php*"' || true
