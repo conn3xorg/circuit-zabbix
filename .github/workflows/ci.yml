@@ -131,10 +131,10 @@ jobs:
           '
           sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 -m http.server --bind 127.0.0.1 8080 > /tmp/listener.log 2>&1'
           sleep 3
-          if TF_VAR_admin_password=a-new-password-3 conn3x apply -auto-approve; then exit 1; fi
+          ! TF_VAR_admin_password=a-new-password-3 conn3x apply -auto-approve
           sudo podman exec circuit-zabbix sh -ec '
             pkill -f [h]ttp.server || true
-            if grep -q api_jsonrpc /tmp/listener.log; then exit 1; fi
+            ! grep -q api_jsonrpc /tmp/listener.log
             systemctl start nginx
           '
           conn3x apply -auto-approve
