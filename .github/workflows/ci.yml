@@ -120,22 +120,34 @@ jobs:
           grep -q 'server #0 started' /var/log/zabbix/zabbix_server.log
           echo "All checks passed."
           EOF
+      # nginx stays active with nothing listening, so the apply reaches the
+      # admin password step while another process holds the port.
       - name: Another process on the port gets no password
         working-directory: examples/local
         env:
           TF_VAR_os: ${{ matrix.os }}
         run: |
+          sudo podman cp ../../test/api-listener.py circuit-zabbix:/tmp/api-listener.py
           sudo podman exec circuit-zabbix sh -ec '
             command -v python3 >/dev/null || { apt-get -qq update && apt-get -qq install -y python3 || dnf -q install -y python3; } >/dev/null
-            systemctl stop nginx
+            install -d /etc/systemd/system/nginx.service.d
+            printf "[Service]\nType=simple\nPIDFile=\nExecStartPre=\nExecStart=\nExecStart=/bin/sleep infinity\nExecReload=\nExecStop=\n" > /etc/systemd/system/nginx.service.d/ci.conf
+            systemctl daemon-reload
+            systemctl restart nginx
+            install -m 666 /dev/null /tmp/listener.log
           '
-          sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 -m http.server --bind 127.0.0.1 8080 > /tmp/listener.log 2>&1'
+          sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 /tmp/api-listener.py 8080 /tmp/listener.log'
           sleep 3
-          ! TF_VAR_admin_password=a-new-password-3 conn3x apply -auto-approve
+          if out=$(TF_VAR_admin_password=a-new-password-3 conn3x apply -auto-approve -no-color 2>&1); then exit 1; fi
+          printf '%s\n' "$out" | grep -q "exit status 1: Port 8080 isn't held by the web server"
           sudo podman exec circuit-zabbix sh -ec '
-            pkill -f [h]ttp.server || true
-            ! grep -q api_jsonrpc /tmp/listener.log
-            systemctl start nginx
+            grep -q apiinfo.version /tmp/listener.log
+            if grep -qE "user[.](login|update)" /tmp/listener.log; then exit 1; fi
+            pkill -u nobody python3
+            rm -r /etc/systemd/system/nginx.service.d
+            systemctl daemon-reload
+            sleep 3
+            systemctl restart nginx
           '
           conn3x apply -auto-approve
           conn3x plan -detailed-exitcode
@@ -156,11 +168,12 @@ jobs:
           sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 /tmp/listener.py 5432 /tmp/listener.log'
           sleep 3
           if out=$(conn3x apply -auto-approve -no-color -target=module.zabbix 2>&1); then exit 1; fi
-          printf '%s\n' "$out" | grep -q "isn't held by PostgreSQL"
+          printf '%s\n' "$out" | grep -q "exit status 1: Port 5432 isn't held by PostgreSQL"
           sudo podman exec circuit-zabbix sh -ec '
+            [ -e /tmp/listener.log ]
             [ ! -s /tmp/listener.log ]
             pkill -u nobody python3
-            # PostgreSQL carries on without an address it can't bind, so make sure it got this one.
+            # PostgreSQL carries on when it cannot bind an address, so make sure it got this one.
             for _ in 1 2 3 4 5; do
               sleep 2
               systemctl restart $(cat /tmp/pg-units)
