@@ -1,5 +1,7 @@
 # circuit-zabbix
 
+[![Conn3x grade](https://conn3x.org/circuits/zabbix/grade.svg)](https://conn3x.org/circuits/zabbix/grade)
+
 A Conn3x circuit that installs Zabbix 7.0 LTS from Zabbix's own repositories: the server and its web frontend on one host, and Zabbix agent 2 on as many hosts as you like. You get a server that's already past the setup wizard, an Admin password that isn't `zabbix`, and agents that know where to report and under what name.
 
 Zabbix keeps its data in PostgreSQL. Pair this circuit with [circuit-postgres](https://github.com/conn3xorg/circuit-postgres) on the same host, or point it at a database you already run. The circuit imports Zabbix's schema into it once, the way Zabbix's install guide does by hand.
