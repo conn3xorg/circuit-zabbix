@@ -229,9 +229,9 @@ jobs:
         env:
           images: ${{ github.workspace }}/conn3x/test/images
         run: |
-          NAME=zabbix-server PORT=2299 CONTAINERFILE=$images/ubuntu2404/Containerfile examples/local/up.sh
+          CONTAINER_NAME=zabbix-server PORT=2299 CONTAINERFILE=$images/ubuntu2404/Containerfile examples/local/up.sh
           cat examples/local/known_hosts >> test/two-hosts/known_hosts
-          NAME=zabbix-agent PORT=2300 CONTAINERFILE=$images/rocky10/Containerfile examples/local/up.sh
+          CONTAINER_NAME=zabbix-agent PORT=2300 CONTAINERFILE=$images/rocky10/Containerfile examples/local/up.sh
           cat examples/local/known_hosts >> test/two-hosts/known_hosts
           cp examples/local/id_ed25519 test/two-hosts/
           echo "TF_VAR_server_ip=$(sudo podman inspect -f '{{.NetworkSettings.IPAddress}}' zabbix-server)" >> "$GITHUB_ENV"
@@ -263,4 +263,4 @@ jobs:
           EOF
       - name: Clean up
         if: always()
-        run: for n in zabbix-server zabbix-agent; do NAME=$n examples/local/down.sh; done
+        run: for n in zabbix-server zabbix-agent; do CONTAINER_NAME=$n examples/local/down.sh; done
