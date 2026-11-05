@@ -21,7 +21,7 @@ module "postgres" {
 }
 
 module "zabbix" {
-  source = "github.com/conn3xorg/circuit-zabbix?ref=v0.1.3"
+  source = "github.com/conn3xorg/circuit-zabbix?ref=v0.1.4"
 
   depends_on = [module.postgres]
 
@@ -59,7 +59,7 @@ Leave `servers` empty and set `server_address` to your Zabbix server, or to the 
 
 ```hcl
 module "zabbix_agents" {
-  source = "github.com/conn3xorg/circuit-zabbix?ref=v0.1.3"
+  source = "github.com/conn3xorg/circuit-zabbix?ref=v0.1.4"
 
   agents         = { web1 = "203.0.113.11", web2 = "203.0.113.12" }
   server_address = "zabbix.example.com"
