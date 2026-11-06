@@ -120,6 +120,7 @@ jobs:
           u=http://127.0.0.1:8080
           rpc() { curl -sf -H 'Content-Type: application/json-rpc' ${tok:+-H "Authorization: Bearer $tok"} --data-binary "$1" $u/api_jsonrpc.php; }
           systemctl is-active zabbix-server zabbix-agent2 nginx
+          if command -v apache2 >/dev/null; then echo "Apache is installed." >&2; exit 1; fi
           curl -sf $u/index.php | grep -q Zabbix
           rpc '{"jsonrpc":"2.0","method":"apiinfo.version","params":{},"id":1}' | grep -q '"result":"7.0.32"'
           if rpc '{"jsonrpc":"2.0","method":"user.login","params":{"username":"Admin","password":"zabbix"},"id":1}' | grep -q '"result"'; then exit 1; fi
