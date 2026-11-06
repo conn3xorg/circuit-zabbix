@@ -34,7 +34,8 @@ locals {
   os     = { for name, h in local.hosts : name => try(h.os, data.conn3x_host.facts[name].os_id) }
   family = { for name, o in local.os : name => contains(["debian", "ubuntu"], o) ? "debian" : "redhat" }
 
-  el_servers = { for name, h in var.servers : name => h if local.family[name] == "redhat" }
+  el_servers  = { for name, h in var.servers : name => h if local.family[name] == "redhat" }
+  deb_servers = { for name, h in var.servers : name => h if local.family[name] == "debian" }
 
   series = regex("^[0-9]+\\.[0-9]+", var.zabbix_version)
 
@@ -220,6 +221,30 @@ circuit "zabbix_el" {
   }
 }
 
+# zabbix-nginx-conf depends on zabbix-frontend-php with no version, so apt
+# would install the newest frontend with it, and the pinned one after it
+# would be a downgrade apt refuses. On Debian and Ubuntu the frontend goes
+# first, at the pinned version. It pulls in PHP's modules, not Apache.
+circuit "zabbix_deb" {
+  hosts = local.deb_servers
+
+  ssh {
+    user             = var.ssh_user
+    port             = var.ssh_port
+    private_key_file = var.ssh_private_key_file
+    known_hosts_file = var.ssh_known_hosts_file
+    become           = var.ssh_become
+  }
+
+  step "frontend" {
+    depends_on = [conn3x_repository.zabbix_repo__repo]
+    package {
+      name    = "zabbix-frontend-php"
+      version = local.version[each.key]
+    }
+  }
+}
+
 circuit "zabbix_server" {
   hosts = var.servers
 
@@ -261,9 +286,10 @@ circuit "zabbix_server" {
     }
   }
 
-  # Before the frontend package, so its PHP comes as PHP-FPM for nginx
-  # rather than as Apache's PHP module.
+  # Before the frontend package on the Red Hat family, so its PHP comes as
+  # PHP-FPM for nginx rather than as Apache's PHP module.
   step "nginx_conf" {
+    depends_on = [conn3x_package.zabbix_deb__frontend]
     package {
       name    = "zabbix-nginx-conf"
       version = local.version[each.key]
