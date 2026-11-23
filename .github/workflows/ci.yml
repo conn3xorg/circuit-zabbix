@@ -151,7 +151,7 @@ jobs:
           sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 /tmp/api-listener.py 8080 /tmp/listener.log'
           sleep 3
           if out=$(TF_VAR_admin_password=a-new-password-3 conn3x apply -auto-approve -no-color 2>&1); then exit 1; fi
-          printf '%s\n' "$out" | grep -q "exit status 1: Port 8080 isn't held by the web server"
+          printf '%s\n' "$out" | grep -q "^Port 8080 isn't held by the web server"
           sudo podman exec circuit-zabbix sh -ec '
             grep -q apiinfo.version /tmp/listener.log
             if grep -qE "user[.](login|update)" /tmp/listener.log; then exit 1; fi
@@ -180,7 +180,7 @@ jobs:
           sudo podman exec -d circuit-zabbix sh -c 'cd /tmp && exec runuser -u nobody -- python3 /tmp/listener.py 5432 /tmp/listener.log'
           sleep 3
           if out=$(conn3x apply -auto-approve -no-color -target=module.zabbix 2>&1); then exit 1; fi
-          printf '%s\n' "$out" | grep -q "exit status 1: Port 5432 isn't held by PostgreSQL"
+          printf '%s\n' "$out" | grep -q "^Port 5432 isn't held by PostgreSQL"
           sudo podman exec circuit-zabbix sh -ec '
             [ -e /tmp/listener.log ]
             [ ! -s /tmp/listener.log ]
