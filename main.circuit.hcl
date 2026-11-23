@@ -408,9 +408,21 @@ circuit "zabbix_server" {
   # PHP-FPM reads Zabbix's pool, and nginx its server block, only at start.
   # It runs here rather than in a handler so the checks below find both
   # running with them.
-  step "restart_web" {
-    command {
-      command = "systemctl restart ${local.web[each.key].fpm} nginx"
+  step "restart_fpm" {
+    service_action {
+      name = local.web[each.key].fpm
+      triggers = {
+        nginx_conf = conn3x_package.zabbix_server__nginx_conf[each.key].revision
+        frontend   = conn3x_package.zabbix_server__frontend[each.key].revision
+        php_pgsql  = conn3x_package.zabbix_server__php_pgsql[each.key].revision
+        listen     = conn3x_line.zabbix_server__listen[each.key].revision
+      }
+    }
+  }
+
+  step "restart_nginx" {
+    service_action {
+      name = "nginx"
       triggers = {
         nginx_conf = conn3x_package.zabbix_server__nginx_conf[each.key].revision
         frontend   = conn3x_package.zabbix_server__frontend[each.key].revision

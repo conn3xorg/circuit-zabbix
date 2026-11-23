@@ -157,7 +157,7 @@ gpg --show-keys files/zabbix.asc files/zabbix-non-supported.asc
 
 ## Requirements
 
-Requires Conn3x v0.6.9 or later and systemd on each host, with access to `repo.zabbix.com` and the distribution's own mirrors. The server needs a PostgreSQL release Zabbix 7.0 supports, with a role and an empty database for Zabbix; the tests used PostgreSQL 18 from circuit-postgres. The droplets in the tests had 2 GB of memory.
+Requires Conn3x v0.28.0 or later and systemd on each host, with access to `repo.zabbix.com` and the distribution's own mirrors. The server needs a PostgreSQL release Zabbix 7.0 supports, with a role and an empty database for Zabbix; the tests used PostgreSQL 18 from circuit-postgres. The droplets in the tests had 2 GB of memory.
 
 ## Tested on
 
